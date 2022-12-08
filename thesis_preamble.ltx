@@ -1,0 +1,181 @@
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{softdev}
+
+%% macros and includes for the comments. Set boolean to enable/disable
+\usepackage{ifthen}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{framed}
+\usepackage{hyperref}
+\usepackage{stmaryrd}
+\usepackage{pifont}
+\usepackage{listings}
+\usepackage{multicol}
+\usepackage{fancyvrb}
+\usepackage{relsize}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{subcaption}
+\usepackage{xspace}
+\usepackage{amsmath}
+\usepackage{mdwlist}
+\usepackage{tikz}
+\usepackage{xstring}
+\usepackage{setspace}
+\usepackage{fancyhdr}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage[all]{nowidow}
+\usepackage{microtype}
+\usepackage[nottoc]{tocbibind} % show bibliography in ToC
+\usepackage{glossaries}
+\usetikzlibrary{calc}
+\usetikzlibrary{positioning}
+\usetikzlibrary{graphs}
+\usetikzlibrary{arrows}
+\usetikzlibrary{shapes}
+
+\usetikzlibrary{automata, positioning, arrows}
+
+\lstset{
+    basicstyle=\ttfamily,
+    xleftmargin=\parindent,
+    numbers=left,
+    numbersep=.8em,
+    numberstyle=\tiny\tt\color{gray},
+    captionpos=b,
+    escapeinside={{<!}{!>}},
+    commentstyle=\color{gray}\itshape,
+    keywordstyle=\textbf,
+}
+
+\lstnewenvironment{lstdefault}[1][]
+  {
+    \lstset{
+        numbers=left,
+        language=Rust,
+        keywordstyle=\color{red!70!black},
+        commentstyle=\itshape\color{gray!90!black},
+        stringstyle=\color{green!60!black},
+        basicstyle=\linespread{1.0}\small\ttfamily,
+        numberstyle=\tiny,
+        keepspaces=true,
+        breaklines=true,
+        captionpos=b,
+        abovecaptionskip=0.8em,
+        columns=fullflexible,
+        xleftmargin=10pt,
+        aboveskip=1em,
+        belowskip=0em,
+        showstringspaces=false,
+        literate={\$}{{\$}}1,
+        escapeinside={{<!}{!>}},
+        deletendkeywords={reduce},
+        #1
+    }
+}{}
+
+\lstnewenvironment{lstdefaultsmall}[1][]
+  {
+    \lstset{
+        numbers=left,
+        language=Python,
+        keywordstyle=\color{red!70!black},
+        commentstyle=\itshape\color{gray!90!black},
+        stringstyle=\color{green!60!black},
+        basicstyle=\linespread{1.0}\footnotesize\ttfamily,
+        numberstyle=\tiny,
+        keepspaces=true,
+        breaklines=true,
+        captionpos=b,
+        abovecaptionskip=0.8em,
+        columns=fullflexible,
+        xleftmargin=2pt,
+        numbersep=5pt,
+        aboveskip=1em,
+        belowskip=0em,
+        showstringspaces=false,
+        literate={\$}{{\$}}1,
+        escapeinside={{<!}{!>}},
+        #1
+    }
+}{}
+
+\linespread{1}
+\setcounter{topnumber}{1} % number of floats at the top
+
+%% end of comment macros
+\newcommand{\brckt}[6]{% x1, x2, y1, y2, end height, text
+    \draw (#1,#2+#5) -- (#1,#2) -- (#3,#4) -- (#3,#4+#5);
+    \node[anchor=west,align=center, minimum width={#3-#1}] at (#1,#2-#5*3) {#6};
+}
+
+\usepackage{setspace}
+\setstretch{1.3}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{2.0ex plus0.5ex minus0.2ex}
+\usepackage{vmargin}
+\setmarginsrb           { 1.5in}  % left margin
+                        { 0.6in}  % top margin
+                        { 1.0in}  % right margin
+                        { 0.8in}  % bottom margin
+                        {  20pt}  % head height
+                        {0.25in}  % head sep
+                        {   9pt}  % foot height
+                        { 0.3in}  % foot sep
+\raggedbottom
+\setlength{\topskip}{1.5\topskip}
+
+% from https://tex.stackexchange.com/questions/264361/skipping-line-numbers-in-lstlisting#264373
+\let\origthelstnumber\thelstnumber
+\makeatletter
+\newcommand*\Suppressnumber{%
+  \lst@AddToHook{OnNewLine}{%
+    \let\thelstnumber\relax%
+     \advance\c@lstnumber-\@ne\relax%
+    }%
+}
+
+\newcommand\boehm{\textsc{BDWGC}\xspace}
+\newcommand\rustc{\lstinline{rustc}\xspace}
+\newcommand\ourgc{\textsc{Alloy}\xspace}
+
+\begin{document}
+\title{\ourgc: Conservative Garbage Collection for Rust}
+\author{Jacob Hughes}
+
+\thispagestyle{empty}
+
+\begin{center}
+\vspace*{10mm}
+{\huge\bf \ourgc: Conservative Garbage collection for Rust\par}
+\vspace{15mm}
+\includegraphics[width=0.4\textwidth]{images/logoc2.jpg}\par
+\LARGE
+\vspace{5mm}
+Jacob Hughes\par
+\vspace{15mm}
+\large
+Thesis submitted in partial fulfilment for the degree of\\
+Doctor of Philosophy\\
+\vspace{5mm}
+Faculty of Natural \& Mathematical Sciences\\
+Department of Informatics\\
+King's College London
+\par
+\vspace{20mm}
+\LARGE
+April 2023
+\end{center}
+\clearpage
+
+% Set header
+\rhead{\thepage}
+\lhead{\chaptername~\thechapter.~\textit{\nouppercase\leftmark}}
+\chead{}\lfoot{}\rfoot{}\cfoot{}
+\pagestyle{fancy}
+\renewcommand{\chaptermark}[1]{\markboth{#1}{}}
+
+\pagenumbering{roman}
