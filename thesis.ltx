@@ -1,0 +1,666 @@
+\include{thesis_preamble.ltx}
+
+\begin{abstract}
+\noindent Rust is a non-Garbage Collected (GC) language, but the lack of GC
+makes expressing some programs (e.g.~those with cyclic data structures)
+awkward or inefficient. Unfortunately, previous attempts to add GC to Rust
+have sacrificed at least one of ergonomics, performance, or soundness. In
+this paper we introduce \ourgc, a new GC for Rust. \ourgc shows that
+conservative GC naturally solves most ergonomic and soundness issues.
+However, Rust's pervasive use of destructors causes significant performance
+problems when they are mapped to GC finalisers. We show that the major
+challenge of \ourgc is to reduce this performance penalty to an acceptable
+level. \ourgc adds several user-facing APIs to Rust, and requires many
+changes to the Rust compiler, but does not change the Rust language itself.
+\end{abstract}
+
+
+\section{Introduction}
+
+Amongst the several ways one can divide programming languages are whether they
+are Garbage Collected (GCed) or not. Traditionally, non-GCed languages have
+required explicit memory management (e.g~\lstinline{C}'s \lstinline{malloc} /
+\lstinline{free} functions). Rust's \emph{ownership types} (a specific instance
+of affine types) make it a hybrid: memory management is implicit but Rust does
+not use GC. For many portions of many programs, a Rust program looks identical,
+from a memory management perspective, to a GCed language equivalent. However,
+programs operating on cyclic data structures are frustrating to write with
+ownership types. Encodings such as the use of weak references protect the user
+from dangling machine pointers, but cannot prevent memory leaks, or dangling
+indices.
+
+Because of this, there have been several attempts to add GC to
+Rust\footnote{`Premodern' Rust had a reference-counted GC which was removed
+gradually from mid 2013 to mid 2014.}. Most are user level libraries
+\laurie{cite the ones we know of} which suffer from limitations such as
+the inability to apply GC to items defined in external libraries. In contrast,
+the Bronze GC~\cite{coblenz21bronze} allows the aliasing of mutable values,
+violating Rust's soundness rules. GC in Rust thus remains an unsolved problem.
+
+In this paper we introduce \ourgc, a new point in the Rust GC design space,
+based on an underlying conservative GC. \ourgc is fairly ergonomic, sound
+from a Rust language perspective (though dependent on the compiler
+tool-chain to respect conservative GCs limitations),
+and has reasonable performance. \ourgc introduces new user-visible APIs and
+requires several changes to the Rust compiler \rustc but does not require any
+changes to the Rust language. We show that the major challenge for \ourgc
+is Rust's extensive use of \emph{destructors} (or \lstinline{drop} methods) ---
+simply mapping these to GC finalisers leads to significant performance
+problems. We show how many finalisers can be safely optimised away.
+
+\laurie{a brief introduction of the Gc type, preferably with a simple code
+listing (with a nice long caption!) that allows readers to quickly develope an
+intuition about what's going on would be great.}
+
+We validate \ourgc's performance in several different ways: a SOM (a cutdown
+Smalltalk) interpreter written specifically to understand how GC in Rust might
+work; WLambda, an externally written interpreter to which we have retrofitted
+GC; \laurie{we probably need a third example that isn't an interpreter!}.
+
+
+\section{Memory management in Rust}
+
+Rust is a general-purpose programming language which guarantees memory safety
+without the use of a garbage collector. Instead, Rust's type system ensures that
+programs are written in a memory-safe way which can be checked statically. This
+can be very powerful, and allows Rust to prevent common memory bugs such as data
+races and iterator invalidation at compile-time. To understand the remainder of
+this chapter, some knowledge of these rules is necessary, so this section will
+introduce the most important concepts: ownership, borrowing, and lifetimes.
+
+The foundation of memory safety in Rust is ownership based on affine types
+\jake{cite}. Each value in Rust has a single owner, and rebinding a value to a
+new variable will use move semantics: the ownership of the value is transferred,
+and the old variable is invalidated. Ownership of a variable expires once it
+goes out of scope, and the value's destructor (if it has one) is run
+automatically. This is similar to how \lstinline{std::unique_ptr} works in
+C++11.
+
+The corollory to ownership is borrowing (Figure \jake{enter}). Programs which
+only consist of ownership transfer are cumbersome to write and can be
+inefficient, so values can be accessed by using borrowed references. Rust
+permits an unlimited number of \textit{immutable} (or shared) references to a
+value simultaneuosly, or a single \textit{mutable} (or unique) reference. In
+addition, while a value is borrowed, the owner may not move or mutate it. A
+references must not live longer than the value being borrowed. These rules are
+enforced at compile-time by Rust's borrow checker. Occasionally, the borrow
+checker is unable to infer the lifetimes of references, and the programmer must
+provide annotations to where lifetimes could be ambiguous (Figure \jake{enter}).
+These borrow rules are a key component of Rust's memory safety because they
+prevent common bugs based on aliasing and invalid references.
+
+In some cases, a single value may require multiple owners: for example, in
+graph-like data structures a node is conceptually jointly owned by any other
+node with incoming edges to it. Since shared ownership is not possible using the
+affine types described above, Rust provides opt-in \textit{reference
+counting}\footnote{Reference counting in Rust is available in two flavours:
+\lstinline{Rc}, for single-threaded use; and \lstinline{Arc}, for multi-threaded
+use, where the count is updated atomically.} for when its needed (Figure
+\jake{enter}). Reference counting is a form of automatic memory management,
+where the value is stored along with a \textit{count}: the number of active
+references to it. The count is incremented / decremented when references are
+created / destroyed respectively. Once the count reaches zero, the value is
+immediately dropped.
+
+TODO: Interior mutability.
+
+The major disadvantage of reference counting is that it is unable free cycles
+without some additional mechanism. A reference cycle will cause a memory leak as
+each value will always appear to have at least one reference to it. Though
+preventing memory leaks is not a requirement for memory safety, it is an
+important consideration when writing programs with good performance. In Rust,
+weak references can be used to break up cyclic data structures, allowing them to
+be freed.
+
+As shown in \jake{Figure}, this kind of reference counting with weak references
+is verbose and can be awkward to use for non-trivial data structures.
+
+In fact, arenas with indices are often used when cyclic data is needed. TODO
+Problems: type punning, not able to take advantage of the safety guarantees
+given by references; All memory must be freed at once.
+
+Both weak references and indexed arenas are a memory safe approach to the
+problem of cyclic data structures in Rust. However, they have clear ergonomic
+disadvantages.
+
+Mention DOM trees in browsers.
+
+\laurie{i would make this a `background' section of sorts: introduce rust
+(briefly) and ownership types, including a simple example of where not having
+GC is a pain. point out that the choices are either a) weakrefs b) manual
+indexes into an array (or similar). be clear that both choices are safe, but
+have unpleasant ergonomics and at least some performance overhead.}
+
+
+\section{\ourgc}
+
+\laurie{introduce \ourgc at a high-level. doesn't need to be super long, but
+give enough of a hint that readers can understand what's going on.}
+
+
+\subsection{Running example}
+
+\laurie{ideally we would introduce a running example that we can gradually
+expand upon as the paper progresses. that can sometimes be impossible, but
+it's something that's worth striving for if possible.}
+
+
+\section{Destructors and Finalisers}
+
+\laurie{imho this section (notice i changed the order of terms in the section
+heading!) is very important. it first needs to define destructors, then needs
+to explain how they map to finalisers.}
+
+\laurie{this paragraph gives an example of how we could order this section. we
+don't have to order things this way, but we need to impose some sort of order
+or we'll overload the reader :)}
+Contrary to our initial expectations, Rust's destructors (`drop methods')
+have been the major source of challenges for \ourgc: naively mapping them
+to finalisers introduces soundness and performance problems. In this section we
+first introduce the general concepts before explaining how we made destructors
+
+
+\subsection{General concepts}
+
+Destructors allow cleanup code to be run when a value is no longer used, and
+are used extensively in Rust, where they are referred to as `drop methods'. If
+a type \texttt{T} implements the \lstinline{Drop} trait, \rustc will
+insert the appropriate drop method whenever instances of \texttt{T} go
+out of scope. \laurie{now comes the tricky bit! What does ``go out of scope
+mean'' in Rust? It's trickier than C++ because of the borrow checker. I might
+be tempted to say something like ``Variables go out of scope when the
+curly bracket block they are defined in terminates; values go out of scope
+unless they are returned from a block.'' which I think is accurate and not
+too verbose.} This is similar \laurie{`similar' is a wishy-washy word :) in
+what way is it similar and in what way is it different?} to the RAII (Resource
+Acquisition is Initialization) idiom in C++, where
+class destructors are used for a similar \laurie{`similar' again} purpose.
+
+\laurie{is this paragraph relevant? i don't think i care about smart pointers at this point in the text.}
+The \lstinline{Drop} trait is used extensively by smart pointers. For example,
+\lstinline{Box<T>} (a heap allocated pointer to a value of type \lstinline{T})
+implements \lstinline{Drop} to free its heap allocation when it goes out
+of scope.
+
+\laurie{ditto this paragraph}
+\lstinline{Drop} is also a core part of shared ownership in Rust. For example,
+when a reference counted smart pointer, \lstinline{Rc}, is dropped, the
+reference count of its contents is decremented. If the count hits zero when
+dropping an \lstinline{Rc}, the shared contents is also dropped.
+
+\laurie{this paragraph is important}
+Garbage collection inevitably complicates Rust's drop semantics. Unlike
+\lstinline{Rc}, shared ownership using \ourgc's \lstinline{Gc} smart pointer
+doesn't keep track of how many references there are to its contents. Instead,
+the collector will free the contents when it's no longer reachable. If the
+contents requires dropping, this now becomes the responsibility of the
+collector, because the compiler can't know when this is expected to happen.
+\ourgc uses \textit{finalisers} to drop these unreachable values.
+
+Finalisation in \ourgc is unordered between \lstinline{Gc}s. If a field in
+\lstinline{Gc<A>} points to \lstinline{Gc<B>}, there is no guarantee that
+\lstinline{Gc<A>} will be finalised first. This is so that \ourgc can be used to
+create strongly connected cycles which do not leak. When an entire cyclic graph
+is unreachable, each node can be finalised independently. This restricts the
+drop implementation for types used in \lstinline{Gc}: they must never
+dereference fields which point to other \lstinline{Gc}s because those objects
+could already be freed at the point of finalisation. In our experiments, we did
+not find this restriction too prohibitive, nevertheless, \ourgc can be built
+with \textit{topological finalisation} instead. In this configuration, values
+are finalised in topological order (\lstinline{Gc<A>} before \lstinline{Gc<B>})
+which permits dereferencing through fields pointing to other \lstinline{Gc}s.
+However, topological finalisation means that cycles will never be finalised,
+which could cause memory leaks. When a finaliser drops a value, its fields are
+dropped recursively according to Rust's drop order. Gc itself does not implement
+drop, so a finalised value cannot recursively drop any other Gcs that it points
+to.
+
+\ourgc, like most VMs implementations, run finalisers on a separate finalisation
+thread [todo ref]. This is for two main reasons: first, a finaliser which needs
+to acquire a lock will deadlock if ran on the same thread which already holds
+the lock; second, the asynchronous nature of finalisers can cause interleaving
+single-threaded code which races \jake{Ref boehm sync paper}. However, using a
+dedicated thread to finalise values means they must be safe to send between
+threads. In Rust, this means that their type must implement the \lstinline{Send}
+marker trait. Figure~\ref{fig:finaliser_race} shows how finalising a
+non-\lstinline{Send} \lstinline{Rc} value on another thread is unsound. \ourgc's
+\lstinline{Gc} smart pointer enforces in the constructor,
+\lstinline{Gc<T>::new}, where \lstinline{T} must have a \lstinline{Send} bound.
+An additional constructor, \lstinline{Gc<T>::new_unfinalizable}, is available
+for non-send values, but they will never be dropped.
+
+The \lstinline{Gc<T>::new} constructor also requires \lstinline{T} to implement
+\lstinline{Sync}. This is because even though it's expected that a finaliser is
+run on a dead value, it may still be able to mutate a field pointing to a shared
+value through a \lstinline{Send} safe smart pointer such as \lstinline{Arc}.
+Figure~\ref{fig:finaliser_race_2} shows how finalising a non-\lstinline{Sync}
+\lstinline{RefCell} value on another thread is unsound. Unfortunately, this
+means that interior mutability in \lstinline{Gc} is limited to the more
+expensive sync-safe mutable containers such as RWLock and Mutex. However, since
+this kind of soundness bug is rare in practice, (because it requires mixing two
+different kinds of shared ownership), we also provide an unsafe constructor
+\lstinline{Gc<T>::new_unsynchronised} which accepts non-sync values and does
+finalisation \jake{bikeshed on the name} where the user guarantees that Sync
+values are not accessed inside the drop method \jake{is this enough?}.
+
+
+TODO: Talk about sync, but first I need to investigate the soundness.
+
+\begin{figure}[t]
+\begin{lstlisting}
+fn foo() {
+    let rc1 = Rc::new(123);
+    {
+        let gc = Gc::new(Rc::clone(rc1));
+    }
+
+    // Finalises unreachable values off-thread
+    force_gc();
+
+    let rc3 = Rc::clone(rc1);
+}
+\end{lstlisting}
+\caption{An example of unsoundness when finalising values off-thread. An
+\lstinline{Rc} is meant for single-threaded
+shared ownership so it updates its reference count non-atomically. The
+\lstinline{force_gc} call on line 8 could reclaim
+\lstinline{gc} as it's no longer reachable. \lstinline{gc} will be finalised
+    off-thread, which means \lstinline{Rc::drop(x)} will run. This is unsound
+    because it has the potential to race with the incref from the
+    \lstinline{clone} on the main-thread on
+line 10.}
+\label{fig:finaliser_race}
+\end{figure}
+
+\begin{figure}[t]
+\begin{lstlisting}
+struct Counter(Arc<RefCell<usize>>);
+
+impl Drop for Counter {
+    fn drop(&mut self) {
+        *self.0.borrow_mut() += 1;
+    }
+}
+
+
+fn main() {
+    let arc1 = Counter(Arc::new(RefCell::new(1)));
+    {
+        let gc1 = Gc::new(Arc::clone(arc1));
+    }
+
+    // Finalises 'gc1' off-thread
+    force_gc();
+
+    *arc1.borrow_mut() += 1;
+    assert_eq!(arc1, 3);
+}
+\end{lstlisting}
+\caption{An example of unsoundness when finalising values off-thread.
+    \lstinline{RefCell} is send-safe but not sync safe because dynamic borrow
+    checking is done non-atomically. This can cause a race if the main-thread
+    mutates at the same time as the finalizer.}
+\label{fig:finaliser_race_2}
+\end{figure}
+
+
+\subsection{Finaliser elision}
+
+A \lstinline{Gc<T>} value where \lstinline{T} needs dropping will use a
+finalizer to call \lstinline{T::drop}. In Rust, \lstinline{drop} is very common,
+so \ourgc ends up using many finalizers. This is not ideal. Programmers who are
+familiar with GCed languages know to avoid using finalizers wherever possible.
+One of the reasons for this is that invoking finalizers usually comes at a
+performance cost. This is certainly true for \ourgc, as we implement finalizers
+using the Boehm GC's unordered finalization API, which conservatively marks
+objects reachable from a finalizer. This additional marking adds up when many
+finalizable objects are present.
+
+Fortunately, we are able to claw back this perfomance hit with an optimisation
+we call \textit{finalizer elision}. The key idea is to remove calls to drop
+which are used solely to free a value's memory, and instead let the collector
+free it. For example, consider the following \lstinline{Gc} which owns a
+reference to a boxed \lstinline{usize}.
+
+\begin{lstlisting}
+    let a = Box::new(123);
+    let gc = Gc::new(a);
+\end{lstlisting}
+
+The reference to a heap allocated integer is moved into a \lstinline{Gc}. This
+causes a finalizer to drop it when \lstinline{gc} is unreachable. However, the
+boxed type is a \lstinline{usize}, which itself does not need dropping. This
+means a finalizer was needed to drop the box, and all it did was call
+\lstinline{GlobalAlloc:dealloc}. This could be much faster if, instead of using
+a finalizer as in the case above, \ourgc recognised that it now solely owns the
+heap allocation from the box, and frees it as it does with its own allocation.
+This is what finalizer elision does. Of course, it's not possible to remove the
+finalizer for drop methods which do things besides deallocation. However, in
+practice, we found that this pattern is common enough that the optimisation can
+improve performance by at least an order of magnitude \jake{obviously, i'll need
+to cite this}.
+
+Finalizer elision is implemented by using traits to change the collector
+behaviour based on certain types. We implement these traits on the various
+standard library types which allocate (such as Box, RawVec, etc). This means
+that for most users, finalizer optimisation will "just work". However, when
+users provide their own allocating types, they will need to implement these
+traits to make use of finalizer elision.
+
+\subsubsection{Preventing Drop}
+
+\ourgc decides whether values of \lstinline{Gc<T>} need finalising based on the
+type of \lstinline{T}. Such analysis can be decided statically and has no
+run-time cost. It can be understood as an extension of the existing
+\lstinline{needs_drop::<T>} support in Rustc but with some additional rules. It
+introduces two new traits: \lstinline{NoFinalize}, and
+\lstinline{OnlyFinalizeContents}, to hint to the collector that certain types
+won't need finalizing.
+
+A type \lstinline{T} which implements the \lstinline{NoFinalize} trait means
+that any \lstinline{Gc<T>} won't need a finaliser. This is true even if
+\lstinline{T}, or any of \lstinline{T}'s component types implements
+\lstinline{Drop}. However, this does not guarantee that \lstinline{T} will not
+be finalised.
+
+\laurie{need to explain OnlyFinalizeContents}
+
+\subsubsection{Using \ourgc to free non-GC'd values}
+
+The second major component of the finalizer elision optimisation is for \ourgc
+to free all heap allocations owned by \lstinline{Gc}. This is non-trivial, as these
+allocations will have not been originally allocated as garbage-collectable
+blocks. Refering back to our original example:
+
+\begin{lstlisting}
+    let a = Box::new(123);
+    let gc = Gc::new(a);
+\end{lstlisting}
+
+\lstinline{a} references a heap allocation created using box. It was allocated
+using Rust's global allocator and is not garbage collected. As we did in step
+one, Without a finalizer to call Box::drop(box), it will leak memory. For
+finalizer elision to work, we need a way to tell the collector that because `gc`
+owns `a`, when it frees `gc`, it must also free the allocation at `box`.
+
+This first requires \ourgc to be able to convert a regular non-garbage-collected
+heap allocation into one that is freed by the collector. In this paper, we will
+refer to a block which is freed by the GC as being managed, and one which is
+freed manually as unmanaged. \ourgc uses the Boehm allocator, which provides
+malloc calls for both managed allocations (\lstinline{GC_malloc}), and unmanaged
+allocations (\lstinline{GC_malloc_uncollectable}). However, it does not allow a
+block to be switched between managed and unmanaged once it has already been
+allocated. This is mainly because Boehm partitions managed and unmanaged
+allocations into distinct pools in memory for implementation reasons.
+
+In \ourgc we modified Boehm to support this. This was done by disabling the
+\lstinline{GC_malloc_uncollectable} function for allocating unmanaged blocks,
+and instead allocate all blocks in the managed heap with \lstinline{GC_malloc}.
+We then make use of a free bit in the object header to denote whether a value is
+managed or not. We modify the collector to not only check the mark bit during
+sweeping, but also whether or not managed bit is set before freeing. We include
+functions, \lstinline{Gc_set_managed} and \lstinline{Gc_set_unmanaged}, for
+un/setting the managed bit, and also provide a new malloc function for blocks
+where the managed bit is unset by default, \lstinline{GC_malloc_unmanaged}. This
+malloc function is used as \ourgc's global allocator, instead of Boehm's
+\lstinline{GC_malloc_uncollectable}.
+
+The final piece of the puzzle is for \ourgc to know which heap allocations are
+owned by a \lstinline{Gc} in order to switch them to be managed. We do this with
+a trait called Collectable, which we implement on all types in the standard
+library which use their drop method to call deallocate. The Collectable trait
+contains a single method, \lstinline{set_collectable}, which describes how to
+switch its value to be managed. For example, the \lstinline{Collectable}
+implementation for \lstinline{Box} would look like this:
+
+\begin{lstlisting}
+unsafe impl<T, A: Allocator> Collectable for Box<T, A> {
+    unsafe fn set_collectable(&self) {
+        unsafe {
+            // FFI call to custom Boehm function to set managed bit
+            set_managed(self.0.as_ptr() as *mut u8);
+        }
+    }
+}
+\end{lstlisting}
+
+In this example, we set the managed bit in the allocation used for Box. Similar
+trait implementations exist for other types which represent allocation such as
+RawVec.
+
+Putting all these pieces together, we use an intrinsic,
+\lstinline{make_collectable<T>}, which is called in a \lstinline{Gc<T>::new}
+constructor. This intrinsic will recurse through \lstinline{T}, searching for
+component types which implement the \lstinline{Collectable} trait. If found,
+code is generated to dereference these fields or enum variants and call their
+\lstinline{Collectable::set_collectable} methods. This leads to all heap
+allocations owned and reachable from the \lstinline{Gc} value being converted to
+managed allocations. This process is dynamic, so it incurs a small runtime cost
+during \lstinline{Gc} construction.
+
+
+\subsection{Preventing Premature Finalisation}
+
+A fundamental assumption in Rust's destructor semantics is that calling
+\lstinline{Drop::drop} on a value is the last thing to happen to it. Using a
+value which has already been dropped is not possible and would cause
+unsoundness. This is no different for garbage-collected values: a finaliser
+calling a value's drop method must be the last thing to happen before its memory
+is reclaimed. One would expect that this is implicitly guaranteed based on the
+nature of GC: a finalizer is only called after a value is already considered
+dead during the mark phase. However, \rustc, like many compilers, is allowed to
+perform any optimisation that does not change the observable behaviour of the
+program. Retrofitting a GC to such a language will introduce assumptions about
+behaviour which the optimiser does not know about. In rare cases, compiler
+optimisations may cause values to be considered unreachable (and thus,
+finalised) earlier than expected~ \cite[p.~7]{boehm03destructors}.
+Figure~\ref{fig:finaliser_premature} shows how this can lead to a use-after-free
+in safe Rust code.
+
+To mitigate this, \ourgc ensures that a \lstinline{Gc} value stays alive for
+long enough that its finaliser is the last time it - or any value it owns - is
+used. Put simply, wherever it may be possible that a \lstinline{Gc} could be
+finalised early, \ourgc will insert a \textit{compiler barrier}, in the form of
+inline assembly to prevent the compiler clobbering a \lstinline{Gc}'s pointer.
+This works by informing the compiler that the pointer, which could exist on the
+call-stack or in a register, is used in a way which it cannot reason about, and
+so it must be more conservative about any optimisations which include it.
+
+We place this compiler barrier in the drop method of a \lstinline{Gc} so that, at
+runtime, its pointer is not clobbered while anything it owns may be referenced
+elsewhere. This is sufficient because a value's drop method is only called once
+it goes out of scope, after which point its contents can be safely finalised.
+However, the \lstinline{Gc} type implements the \lstinline{Copy} trait, which
+means that without compiler support, it would not be possible to use a
+\lstinline{Drop} based compiler barrier. \ourgc modifies \rustc to allow these
+simultaneuos implementations on the \lstinline{Gc} type, because simply emitting
+a barrier will not cause memory unsafety.
+
+On its own, this approach will vastly overapproximate the potential places where
+early finalisation can happen, which can have a significant impact on
+performance. While compiler barriers will not place any constraints on the CPU,
+they will still prevent unrelated useful optimisations. This presents a
+correctness / performance trade-off, so where possible, \ourgc will not insert a
+barrier when it can guarantee that an untimely collection will not lead to a
+finaliser being called early.
+
+All \lstinline{Gc} values have barriers by default. However, when compiling a
+program, we remove barriers which we can prove are unnecessary. We do this once
+\rustc has generated an intermediate representation known as mid-level IR (MIR):
+a control-flow graph of the program which it uses for analysis and
+optimisations. We perform an in-order traversal on the MIR for each function
+which contain arguments or local variables of type \lstinline{Gc}. If the
+contents of a \lstinline{Gc} does not require finalizing, its drop method can be
+removed as there is no need for a barrier. Temporary values of \lstinline{Gc}
+also have their drop methods removed because they are derived from user
+variables which will already be dropped if necessary. We do this before any of
+\rustc's optimisation MIR passes to minimise the impact that extreaneous drops
+may have on other optimisations.
+
+\subsubsection{Limitations}
+
+Although theoretically possible, we consider early finalisation to be extremely
+rare in practice. While testing \ourgc, we were unable to trigger this using
+safe Rust code only. This is because it requires a combination of unlikely
+things to go wrong: the only traceable reference to a GC value must be
+clobbered, followed by a unfortunately timed signal interruption triggering a
+collection. Recreating this is challenging: artificially forcing a collection
+requires an opaque FFI call which tends preserve the pointer across the call.
+
+Worse still, the mitigation for this highly unlikely bug can incur a steep
+performance penalty (sometimes up to \jake{TODO: value}) - even with the barrier
+removal pass described above. While any mitigation which guarantees
+correctness will always overapproximate in some way, there are places where
+\ourgc's approach can be clearly improved upon. As shown in
+figure~\ref{fig:finaliser_premature}, early finalisation requires the
+simultaneuos existence of a \lstinline{Gc}, and an inner reference to something
+it owns. This is something that can be checked at compile-time. A future
+improvement could use this knowledge to insert barriers only when such an
+occurance takes place.
+
+The compiler barrier in \ourgc uses non-portable assembly. We have tested that
+this is correct using \rustc's LLVM backend for x86/64. However, this is likely
+not sufficient for architectures such as MIPs and PowerPC. To address this, the
+drop implementation for \lstinline{Gc} would need to be conditionally compiled
+for the intended target.
+
+\begin{figure}[t]
+\begin{lstlisting}
+
+fn foo() {
+    let a = Gc::new(Box::new(123));
+    let ref box_ptr = &*a.0;
+
+    bar();
+
+    // Gc happens here causing
+    // a's finaliser to drop the box.
+
+
+    println!("{`box_ptr`}"); // Potential use-after-free!
+
+}
+
+\end{lstlisting}
+\caption{An example of unsoundness if a finaliser is allowed to run early.
+    Both \lstinline{a} and \lstinline{box_ptr} live until the end
+    of \lstinline{foo}. However, if the computation-heavy \lstinline{bar} is
+    inlined into \lstinline{foo}, the compiler may clobber the register
+    containing \lstinline{a} because it is no longer used.
+    An unfortunately timed garbage collection before the \lstinline{println} may
+    then determine that \lstinline{a}'s allocation is unreachable, calling its
+    finaliser before \lstinline{foo} is finished. This would drop the box that
+    it owns, and cause \lstinline{box_ptr} to become a dangling reference.}
+    \label{fig:finaliser_premature}
+\end{figure}
+
+\jake{TODO: Add example of early finalizer causing race due to interleaving
+finalizer thread}
+
+
+\subsection{Multi-threaded garbage collection}
+
+In single-threaded GC, roots can only exist in three places: the
+call stack, registers, and in the program's \emph{data segment} (for static
+variables). In a multi-threaded GC, there are multiple call stacks, each
+of which must be scanned for roots. This requires threads to cooperate in order
+to make sure that this scanning can be done in a consistent fashion. The most
+simple form of cooperation is to `stop the world', that is for threads to notice
+when a global condition is set, and for them to voluntarily pause themselves.
+\boehm uses this strategy, with threads checking whether they should pause
+during memory allocation \laurie{GC\_alloc?} or \lstinline{force_gc}.
+\jake{subtle difference: the mutator threads themselves don't poll to see if
+they should pause. Instead, the collector forces them to by sending them signals
+to wait on which are never usually used (e.g. SIGPWR / SIGBUS)} \laurie{ok.
+so why do we say they also wait in GC\_alloc and force\_gc ?}
+
+\ourgc patches
+Rust's threading implementation to register/register threads on creation/destruction with \boehm.
+on thread creation, and unregister when a thread is destroyed. To facilitate
+pausing threads when the collector needs a consistent memory state, \ourgc uses
+\boehm's signal spin implementation: when the collector thread wishes to stop the
+world, it sends a SIGPWR signal to each registered thread and has them spin in a
+signal handler until the collector has finished stopping the
+world.\jake{cite} \laurie{is this something that \ourgc has added, or is this
+spinning what \boehm does without our help?} \jake{This is all boehm}
+
+This has two key limitations: first, \ourgc can only stop the world during
+allocation and calls to \lstinline{force_gc} by a mutator thread; second, it
+makes use of implementation-defined behaviour because it relies on the target
+OS's mechanism for pausing threads. \boehm provides implementations for most
+platforms, but it is not portable. An implementation where Rust inserts thread
+pause safepoints at appropriate locations would largely solve these issues, with
+considerable implementation effort.
+
+\subsection{Off-thread Finalisation}
+
+Most VMs implementations run finalisers on a separate finalisation thread [todo
+ref]. This is for two main reasons: first, a finaliser which needs to acquire a
+lock will deadlock if ran on the same thread which already holds the lock;
+second, the asynchronous nature of finalisers can cause interleaving
+single-threaded code which races.
+
+For these reasons, \ourgc finalises \lstinline{Gc<T>} values on a dedicated
+finalisation thread, which requires \lstinline{T} to implement the
+\lstinline{Send} marker trait. Figure~\ref{fig:finaliser_race} shows an example
+of how finalising a non-\lstinline{Send} type off-thread is unsound. When
+\lstinline{T} does not implement \lstinline{Send}, a collected \lstinline{Gc<T>}
+will never be finalised. \ourgc will show a compiler warning lint to the user
+explaining this.
+
+Counterintuitively, it is permissable for rustgc to finalise
+non-\lstinline{Sync} values off-thread. The \lstinline{Sync} trait is required
+to reference a type from multiple threads simultaneuosly.  However, \ourgc's
+\textit{dynamic liveness extension} guarantees that \textit{Gc} values are not
+reclaimed early, so a value's finaliser will never run while it is still
+reachable from a mutator thread. This allows finalisers to to access their
+value's data without synchronisation.  \jake{todo: link to subsection about
+inline asm which keeps values alive in mir}
+
+This has the ergonomic benefit of allowing off-thread finalisation of GC'd
+values with interior mutability using the \lstinline{RefCell} pattern. A
+\lstinline{Gc<RefCell<T>>} implements \lstinline{Send} if \lstinline{T} does.
+However, \lstinline{RefCell} does not implement \lstinline{Sync} because the
+dynamic borrow checking it performs, which is implemented internally as a form
+of reference counting, is not thread-safe.
+
+\ourgc provides an \textit{escape hatch} to support the finalisation of
+non-\lstinline{Send} values on the same thread which owns the value. Without
+this, patterns such as \lstinline{Gc<Rc<T>>} would be unusable because the
+\lstinline{Rc} would never be dropped and always leak memory. \footnote{While no garbage collector
+can guarantee that finalisers are run, missed finalisers in \ourgc are rare in
+practice, which make the mixing of garbage collected and reference counted
+stategies both viable and useful.} The unsafe trait
+\lstinline{FinaliseLocally} can be implemented on types, such as \lstinline{Rc}
+where thread-local finalisation is desired. \jake{Bikeshed on the trait name}.
+This is unsafe because the user must ensure that this trait is only
+implemented on a a type where the drop implementation does not access any
+data using synchronisation primitives. This is because it is not possible to
+guarantee such accesses would be deadlock free due to the non-deterministic
+execution of the finaliser.
+
+\cite{jones16garbage}
+
+
+
+
+\section{Background}
+
+\jake{TODO: Not sure where this stuff goes, or if it will ever make the cut}Rust uses two marker traits: `Send`, and `Sync` for handling concurrency. A type
+which implements `Send' is safe to pass between threads, and a type which
+implements `Sync' can be referenced from multiple threads at the same time.
+These marker traits are implemented transitively; in other words, if a type
+`T''s component types all implement `Send' and `Sync', then so will `T'.
+Further, if any component type is not `Send' or `Sync', then neither is `T'.
+These marker traits allow Rust to catch potential concurrency bugs statically
+during type checking.
+
+Rust allows for single-threaded shared ownership using a reference counting
+smart pointer, `Rc<T>'. It updates the reference count non-atomically, it
+can't implement `Send' because two threads could race when updating the count.
+
+
+\bibliographystyle{plain}
+\bibliography{bib}
+
+\end{document}
