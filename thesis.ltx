@@ -101,58 +101,249 @@ it's something that's worth striving for if possible.}
 
 \section{Rust concepts}
 
-Rust is a general-purpose programming language which guarantees memory safety
-without the use of a garbage collector. Instead, Rust's type system ensures that
-programs are written in a memory-safe way which can be checked statically. This
-can be very powerful, and allows Rust to prevent common memory bugs such as data
-races and iterator invalidation at compile-time. To understand the remainder of
-this chapter, some knowledge of these rules is necessary, so this section will
-introduce the most important concepts: ownership, borrowing, and lifetimes.
+This section gives a brief overview of the Rust programming language, with a
+particular focus on Rust's memory safety features, as these are necessary to
+understand \ourgc. It is not assumed that the reader is familiar with Rust.
 
-\subsection{Ownership and borrowing}
+Rust \cite{klabnik18rust} is a statically-typed, general-purpose programming
+language. Rust has high-level functional programming constructs as well as
+low-level features such as support for inline assembly and a foreign function
+interface (FFI) allowing it to call (and be called from) C. This makes Rust
+popular for both low-level systems programming and complex programs where
+performance is important, such as parts of Mozilla's Firefox web
+browser~\cite{servo}.
+
+Arguably Rust's most interesting feature is that it can guarantee memory safety
+without using tracing garbage collection or reference counting\footnote{TODO:
+Explain that Rust does have opt-in reference counting}. Instead, Rust's
+type system ensures that references are guaranteed to point to valid memory,
+which can be checked at compile-time. These rules are the focus of this section,
+as they are key to understanding the memory management story in Rust, and why
+one may wish to extend it with a garbage collector such as \ourgc.
+
+\subsection{Ownership, borrowing, and lifetimes}
+
+\subsubsection{Ownership}
 
 The foundation of memory safety in Rust is ownership based on affine types
 \jake{cite}. Each value in Rust has a single owner, and rebinding a value to a
-new variable will use move semantics: the ownership of the value is transferred,
-and the old variable is invalidated. Ownership of a variable expires once it
-goes out of scope, and the value's destructor (if it has one) is run
-automatically. This is similar to how \lstinline{std::unique_ptr} works in
-C++11.
+new variable will use \textit{move semantics}, where the ownership of the value is transferred,
+and the old variable is invalidated. Consider the following example:
 
-The corollory to ownership is borrowing (Figure \jake{enter}). Programs which
-only consist of ownership transfer are cumbersome to write and can be
-inefficient, so values can be accessed by using borrowed references. Rust
-permits an unlimited number of \textit{immutable} (or shared) references to a
-value simultaneuosly, or a single \textit{mutable} (or unique) reference. In
-addition, while a value is borrowed, the owner may not move or mutate it. A
-references must not live longer than the value being borrowed. These rules are
-enforced at compile-time by Rust's borrow checker. Occasionally, the borrow
-checker is unable to infer the lifetimes of references, and the programmer must
-provide annotations to where lifetimes could be ambiguous (Figure \jake{enter}).
-These borrow rules are a key component of Rust's memory safety because they
-prevent common bugs based on aliasing and invalid references.
+\begin{lstrust}
+fn main() {
+    let mut v = Vec::new(); // v: Vec<i32>
+    v.push(1);
+    foo(v);
+    v.push(3); // compile-error: v has been moved into foo
+}
+
+fn foo(v: Vec<i32>) {
+    v.push(2);
+}
+\end{lstrust}
+
+A new empty vector, \lstinline{v}, of type \lstinline{Vec<i32>} is created
+inside Rust's \lstinline{main} entry-point function. A vector is a resizable
+heap allocated array which contains elements of a single type (signed 32 bit
+integers in this case). In Rust, variables are \textit{immutable} by default, so
+the \lstinline{mut} syntax indicates that \lstinline{v} should be \textit{mutable}.
+\lstinline{v} is then passed as a parameter to \lstinline{foo}, which consists
+of a \textit{shallow} move: the parts of the vector on the stack are moved but
+the underlying heap-allocated contents are not. However, the ownership of
+\lstinline{v} is transferred, which means its contents can no longer be accessed
+from inside \lstinline{main}. Attempting to use a value after a move (line 5)
+will cause a compiler error.
+
+At the end of \lstinline{foo}, the vector goes out of scope, and Rust will
+automatically call its \textit{destructor} - a method which frees its heap
+allocated memory. So far, this may all seem familiar to \cpp programmers who are
+used to \cppxi move semantics and the \textit{ resource acquisition is
+initialisation (RAII)} idiom. However, unlike in \cpp, all types are movable by
+default in Rust.\footnote{For convenience, some types, such as integers, use
+copy semantics instead. This happens when a type implements the \lstinline{Copy}
+trait, allowing it to be used without worrying about ownership.} In
+addition, \cpp does not prevent values from being accessed after they are moved,
+which is forbidden in Rust.
+\subsubsection{Borrowing}
+
+Rust's exclusive ownership rules alone allow it to avoid garbage
+collection.\footnote{However, as we will see, they make it impossible to write
+certain data structures in Rust (such as doubly-linked-lists) without using some
+form of garbage collection.} However, they are fairly restrictive.
+It would be very cumbersome to write programs which can only use values by
+transfering ownership back and forth each time. Rust addresses this with the
+concept of \textit{borrowing}, where values can be accessed using borrowed
+references instead of transferring ownership.
+
+There are two kinds of references in Rust: \lstinline{&} immutable (or shared)
+references; and \lstinline{&mut} mutable (or unique) references. Rust programs
+which use borrowing must adhere to two rules: first, a value can have an
+unlimited number of simultaneous immutable references or a single mutable
+reference; second, a reference must never outlive its \textit{referant} (the
+value it points to). These properties are checked at compile-time by Rust's
+\textit{borrow checker}, meaning that a Rust program which successfully compiles
+is guaranteed to be memory safe.
+
+Lets see how the previous example would look if \lstinline{foo} borrowed a
+reference to the vector instead:
+
+\begin{lstrust}
+fn main() {
+    let mut v = Vec::new(); // v: Vec<i32>
+    v.push(1);
+    let vref = &mut v;
+
+    // This is not allowed, because it's not possible to use v
+    // while a reference to it exists:
+    // v.push(2);
+
+    foo(vref);
+
+    // This is allowed, because v was not moved and vref expired
+    // at the end of foo:
+    v.push(3);
+}
+
+fn foo(v: &mut Vec<i32>) {
+    v.push(2);
+}
+\end{lstrust}
+
+A reference to the vector, \lstinline{vref}, is created and passed to
+\lstinline{foo}. To ensure that nothing aliases a mutable reference, it is
+illegal to use the vector via the owned variable \lstinline{v} while
+\lstinline{vref} is still alive (line 8). When \lstinline{vref} expires at the
+end of \lstinline{foo}, it is safe to mutate the vector through \lstinline{v}
+again (line 14).
+
+It's easy to see how these borrow rules guarantee data-race freedom: a mutating
+thread will never access data which is aliased (either mutably, or immutably).
+What's less obvious is that these rules will also prevent a class of memory
+safety bugs which manifest when single-threaded shared mutability is permitted.
+One such example is that Rust prevents \textit{iterator invalidation}, where
+an iterator becomes invalid because a data structure is mutated while it is
+being iterated over, as shown in Figure~\ref{fig:iterator_invalidation}.
+
+
+\begin{figure}[t!]
+\begin{subfigure}{0.3\textwidth}
+\begin{center}
+\begin{lstrustsmall}
+fn main() {
+    let mut v = vec![1,2,3,4];
+
+    for i in v.iter_mut() {
+        v.push(*i);
+    }
+}
+\end{lstrustsmall}
+\end{center}
+\end{subfigure}
+    \hspace{2cm}
+\begin{subfigure}{0.9\textwidth}
+\begin{center}
+\begin{lstlisting}
+error[E0499]: cannot borrow `v` as mutable more
+than once at a time
+ --> src/main.rs:5:5
+  |
+4 | for i in v.iter_mut() {
+  |          ------------
+  |          |
+  |          first mutable borrow occurs here
+  |          first borrow later used here
+5 |     v.push(*i);
+  |     ^^^^^^^^^^ second mutable borrow occurs here
+
+\end{lstlisting}
+\end{center}
+\end{subfigure}
+    \caption{An example invalid Rust program and its compilation error. This
+    fails to compile because two mutable borrows overlap: the variable
+    \lstinline{v} which owns the vector; and the borrow from the iterator to the vector
+    element \lstinline{i}. If this program were to compile, it would be
+    potentially memory unsafe due. The call to \lstinline{push} resizes
+    the vector, which could cause it to be reallocated in the heap. The
+    iterator reference \lstinline{i} would then be invalid as it points to the
+    old location in memory.}
+\label{fig:iterator_invalidation}
+\end{figure}
+
+\subsubsection{Lifetimes}
+
+As previously explained, references are valid provided they do not outlive their
+referant. The borrow checker ensures that this is adhered to using a construct
+known as \textit{lifetimes}. Each reference in Rust has a lifetime, which begins
+when it is created and ends when it is destroyed. In the examples shown up until
+now, the borrow checker has been able to infer the lifetimes
+
+Occasionally, the borrow checker is unable to infer the lifetimes of references,
+and the programmer must provide annotations to where lifetimes could be
+ambiguous (Figure \jake{enter}). These borrow rules are a key component of
+Rust's memory safety because they prevent common bugs based on aliasing and
+invalid references.
+
+\begin{figure}[t!]
+\begin{lstrust}
+fn main() {
+    <!\tikzmark{starta}!>let mut v = vec![1,2,3,4]<!\tikzmark{enda}!>;
+
+    for i in v.iter_mut() {
+        v.push(*i);
+    }
+}
+\end{lstrust}
+\begin{tikzpicture}[remember picture,overlay]
+\draw[gray,rounded corners, dashed]
+  ([shift={(-3pt,2ex)}]pic cs:starta) 
+    rectangle 
+  ([shift={(6pt,-0.75ex)}]pic cs:enda);
+\end{tikzpicture}
+\end{figure}
+
+% Example
+% Mention Reborrowing
+
+\subsubsection{Cloning data}
+
+% Copy and Clone trait
+
+\jake{Where does this stuff go?}
+
+
+
+\subsection{Destructors}
+
+% The Drop Trait
+% Destructor Order
+% Explicit drop_in_place
+% Copy, Drop exclusivity
+% ManuallyDrop and mem forget
+% The Vec example and the needs_drop intrinsic
+
+\subsection{Interior mutability}
+TODO: Interior mutability.
+% Cell
+% RefCell
+% Mutex
+% Send + Sync marker traits
+
+\subsection{Shared ownership}
 
 In some cases, a single value may require multiple owners: for example, in
 graph-like data structures a node is conceptually jointly owned by any other
 node with incoming edges to it. Since shared ownership is not possible using the
 affine types described above, Rust provides opt-in \textit{reference
-counting}\footnote{Reference counting in Rust is available in two flavours:
-\lstinline{Rc}, for single-threaded use; and \lstinline{Arc}, for multi-threaded
-use, where the count is updated atomically.} for when its needed (Figure
-\jake{enter}). Reference counting is a form of automatic memory management,
-where the value is stored along with a \textit{count}: the number of active
-references to it. The count is incremented / decremented when references are
-created / destroyed respectively. Once the count reaches zero, the value is
-immediately dropped.
-
-\subsection{Destructors}
-
-TODO: write
-
-\subsection{Interior mutability}
-TODO: Interior mutability.
-
-\subsection{Shared ownership}
+counting}\footnote{Reference counting in Rust is supported via a smart-pointer
+type in the standard library. It is very similar to \cpp's
+\lstinline{std::shared_ptr} type and comes in two flavours: \lstinline{Rc}, for
+single-threaded use; and \lstinline{Arc}, for multi-threaded use, where the
+count is updated atomically.} for when its needed (Figure \jake{enter}).
+Reference counting is a form of automatic memory management, where the value is
+stored along with a \textit{count}: the number of active references to it. The
+count is incremented / decremented when references are created / destroyed
+respectively. Once the count reaches zero, the value is immediately dropped.
 
 The major disadvantage of reference counting is that it is unable free cycles
 without some additional mechanism. A reference cycle will cause a memory leak as
@@ -181,8 +372,37 @@ have unpleasant ergonomics and at least some performance overhead.}
 
 Mention DOM trees in browsers.
 
-\subsection{Destructors}
+% Using indices to build GC like data structures
+
+
 \subsection{Unsafe Rust}
+
+% Raw pointers
+%  - aliasing rules, stacked borrows, miri, UB
+% UnsafeCell
+% - used as an escape hatch for interior mutability
+% - used to build Cell / Mutex / RefCell
+% You still have to adhere to the rules, the compiler just doesn't check for you
+
+\section{Why a GC for Rust?}
+\subsubsection{Existing GC in rust}
+% Luster
+%  - GC for lua using mutation contexts
+
+% GC arena
+%  - extension of rust-gc
+
+% bacon-rajan implementation
+
+% rust-gc
+% - Really a form of reference counting under the hood
+% - Requires cloning
+
+% shifgrethor
+% - An idea for rooting, not an actual full-fledged GC
+
+% Bronze GC
+% - Allows mutable references, unsound
 
 
 \section{\ourgc basics}
@@ -693,6 +913,10 @@ OS's mechanism for pausing threads. \boehm provides implementations for most
 platforms, but it is not portable. An implementation where Rust inserts thread
 pause safepoints at appropriate locations would largely solve these issues, with
 considerable implementation effort.
+
+\cite{rustgc}
+\cite{luster}
+\cite{servo}
 
 
 \cite{jones16garbage}
